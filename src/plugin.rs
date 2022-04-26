@@ -6,6 +6,8 @@ use pretty_type_name::pretty_type_name_str;
 
 use crate::{Context, Inspectable, InspectableRegistry};
 
+type CustomizeWindow = fn(egui::Window) -> egui::Window;
+
 #[allow(missing_debug_implementations)]
 /// Bevy plugin for the inspector.
 /// See the [crate-level docs](index.html) for an example on how to use it.
@@ -14,6 +16,7 @@ pub struct InspectorPlugin<T> {
     exclusive_access: bool,
     initial_value: Option<Box<dyn Fn(&mut World) -> T + Send + Sync + 'static>>,
     window_id: WindowId,
+    customize_window: Option<CustomizeWindow>,
 }
 
 impl<T: Default + Send + Sync + 'static> Default for InspectorPlugin<T> {
@@ -30,6 +33,7 @@ impl<T: FromWorld + Send + Sync + 'static> InspectorPlugin<T> {
             marker: PhantomData,
             initial_value: Some(Box::new(T::from_world)),
             window_id: WindowId::primary(),
+            customize_window: None,
         }
     }
 }
@@ -42,6 +46,7 @@ impl<T> InspectorPlugin<T> {
             exclusive_access: true,
             initial_value: None,
             window_id: WindowId::primary(),
+            customize_window: None,
         }
     }
 
@@ -58,6 +63,14 @@ impl<T> InspectorPlugin<T> {
     pub fn on_window(self, window_id: WindowId) -> Self {
         InspectorPlugin { window_id, ..self }
     }
+
+    /// Customizes the egui window created by the plugin
+    pub fn customize_window(self, customize_window: CustomizeWindow) -> Self {
+        InspectorPlugin {
+            customize_window: Some(customize_window),
+            ..self
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -69,16 +82,24 @@ pub struct InspectorWindowData {
     pub window_id: WindowId,
     /// Whether the ui is currently shown
     pub visible: bool,
+
+    customize_window: Option<CustomizeWindow>,
 }
 #[derive(Default)]
 /// Can be used to control whether inspector windows are shown
 pub struct InspectorWindows(bevy::utils::HashMap<TypeId, InspectorWindowData>);
 impl InspectorWindows {
-    fn insert<T: 'static>(&mut self, name: String, window_id: WindowId) {
+    fn insert<T: 'static>(
+        &mut self,
+        name: String,
+        window_id: WindowId,
+        customize_window: Option<CustomizeWindow>,
+    ) {
         let data = InspectorWindowData {
             name,
             window_id,
             visible: true,
+            customize_window,
         };
         self.0.insert(TypeId::of::<T>(), data);
     }
@@ -162,10 +183,14 @@ where
             if inspector_windows.contains_name(full_type_name) {
                 panic!("two types with different type_id but same type_name");
             } else {
-                inspector_windows.insert::<T>(full_type_name.into(), self.window_id);
+                inspector_windows.insert::<T>(
+                    full_type_name.into(),
+                    self.window_id,
+                    self.customize_window,
+                );
             }
         } else {
-            inspector_windows.insert::<T>(type_name, self.window_id);
+            inspector_windows.insert::<T>(type_name, self.window_id, self.customize_window);
         }
     }
 }
@@ -224,14 +249,17 @@ where
             let value = unsafe { &mut *(data.as_ref() as *const T as *mut T) };
 
             let mut changed = false;
-            egui::Window::new(&window_data.name)
+            let mut egui_window = egui::Window::new(&window_data.name)
                 .resizable(false)
-                .vscroll(true)
-                .show(&ctx, |ui| {
-                    default_settings(ui);
+                .vscroll(true);
+            if let Some(customize_window) = window_data.customize_window {
+                egui_window = customize_window(egui_window);
+            }
+            egui_window.show(&ctx, |ui| {
+                default_settings(ui);
 
-                    changed = value.ui(ui, T::Attributes::default(), &mut context);
-                });
+                changed = value.ui(ui, T::Attributes::default(), &mut context);
+            });
 
             if changed {
                 // trigger change detection
